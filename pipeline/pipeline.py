@@ -623,6 +623,100 @@ def calculate_percent_distributions(image_name, image_name_column, structure_1, 
 
     return rna_distribution_dict
 
+def calculate_sum_distributions(image_name, image_name_column, structure_1, structure_2, distances, conn):
+    """ Takes an image name (string), a list of distances, and a connection object
+
+    Measures the percent of total RNA (percent_total_rna) and the percent of total RNA in granules (percent_granule_rna) at each distance in the distances list
+
+    Returns a dict mapping the image name, the distances, the percent_total_rna, and the percent RNA in granules
+    """
+    # package import
+    from psycopg2 import sql
+    import psycopg2
+
+    cur = conn.cursor()
+
+    distance_col = 'distance_to_' + structure_2
+
+    sum_rna_list = []
+    sum_granule_list = []
+
+    for distance in distances:
+        rna_sum_query = sql.SQL("""SELECT SUM(normalized_intensity) from {rna_table}
+                WHERE {name} = %(image_name)s AND {distance_col} <= %(distance)s""").format(
+                rna_table = sql.Identifier(structure_1),
+                distance_col =sql.Identifier(distance_col),
+                name = sql.Identifier(image_name_column))
+
+        cur.execute(rna_sum_query, {'image_name':image_name, 'distance' : distance})
+        sum_rna = cur.fetchall()[0][0]
+
+        rna_granule_query = sql.SQL("""SELECT SUM(normalized_intensity) from {rna_table}
+                WHERE {name} = %(image_name)s AND {distance_col} <= %(distance)s
+                AND normalized_intensity >= 4""").format(
+                rna_table = sql.Identifier(structure_1),
+                distance_col =sql.Identifier(distance_col),
+                name = sql.Identifier(image_name_column))
+
+        cur.execute(rna_granule_query, {'image_name':image_name, 'distance' : distance})
+        granule_rna = cur.fetchall()[0][0]
+
+        if sum_rna == None:
+            sum_rna = 0
+
+        if granule_rna == None:
+            granule_rna = 0
+
+        sum_rna_list.append(sum_rna)
+        sum_granule_list.append(granule_rna)
+
+    cur.close()
+
+    rna_distribution_dict = {'distance': distances, 'sum_total_rna': sum_rna_list, 'sum_granule_rna' : sum_granule_list}
+
+    return rna_distribution_dict
+
+def calculate_sums_by_image_per_cycle(image_data_list, distance_threshold_dict, step_size, image_name_column, stage_column, structure_1, structure_2, conn):
+    """ Takes a list of dictionaries containing image metadata including the image name under the key 'name', a distance threshold, a step_size, the structure_2 distance target, and a postgres db connection object
+
+    Calculates the percent of total RNA and the percent of RNA in granules from 0 microns to the distance threshold away from a structure_2 object (or max image distance if the distance_threshold is set to None) at increments dictated by the step size
+
+    Returns a pandas dataframe object containing the distribution data
+    """
+
+    # package import
+    import psycopg2
+    from psycopg2 import sql
+    import numpy as np
+    import pandas as pd
+
+
+    cur = conn.cursor()
+
+    distribution_dicts = []
+
+    for image_data_dict in image_data_list:
+
+        image_name = image_data_dict[image_name_column]
+        cycle = image_data_dict[stage_column]
+        distance_threshold = distance_threshold_dict[cycle]
+
+        print('Calculating cumulative distributions for ' + image_name)
+
+        distances = np.arange(0, distance_threshold, step_size)
+        distances = np.append(distances, distance_threshold)
+
+        rna_distribution_dict = calculate_sum_distributions(image_name, image_name_column, structure_1, structure_2, distances, conn)
+
+        rna_distribution_dict.update(image_data_dict)
+
+        distribution_dicts.append(rna_distribution_dict)
+
+    rna_distributions_df = pd.concat([pd.DataFrame(dict_obj) for dict_obj in distribution_dicts])
+
+    return rna_distributions_df
+
+
 def calculate_distributions_by_image(image_data_list, distance_threshold, step_size, image_name_column, structure_1, structure_2, conn):
     """ Takes a list of dictionaries containing image metadata including the image name under the key 'name', a distance threshold, a step_size, the structure_2 distance target, and a postgres db connection object
 
