@@ -643,7 +643,7 @@ def calculate_sum_distributions(image_name, image_name_column, structure_1, stru
 
     for distance in distances:
         rna_sum_query = sql.SQL("""SELECT SUM(normalized_intensity) from {rna_table}
-                WHERE {name} = %(image_name)s AND {distance_col} <= %(distance)s""").format(
+                WHERE {name} = %(image_name)s AND {distance_col} = %(distance)s""").format(
                 rna_table = sql.Identifier(structure_1),
                 distance_col =sql.Identifier(distance_col),
                 name = sql.Identifier(image_name_column))
@@ -652,7 +652,7 @@ def calculate_sum_distributions(image_name, image_name_column, structure_1, stru
         sum_rna = cur.fetchall()[0][0]
 
         rna_granule_query = sql.SQL("""SELECT SUM(normalized_intensity) from {rna_table}
-                WHERE {name} = %(image_name)s AND {distance_col} <= %(distance)s
+                WHERE {name} = %(image_name)s AND {distance_col} = %(distance)s
                 AND normalized_intensity >= 4""").format(
                 rna_table = sql.Identifier(structure_1),
                 distance_col =sql.Identifier(distance_col),
