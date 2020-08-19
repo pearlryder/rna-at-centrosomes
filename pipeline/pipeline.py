@@ -197,7 +197,7 @@ def minimum_distance(object_1, object_2):
     return float(minimum_distance)
 
 
-def create_postgres_table(conn, structure):
+def create_postgres_table(structure, database_name, db_user, db_password, db_host):
     """ Function to create foundational table for holding data related to images
     All images of subcellular structures have this foundational data collected and stored
     The rna table has specialized additional columns for distance measurements that are added separately
@@ -214,7 +214,7 @@ def create_postgres_table(conn, structure):
     from psycopg2 import sql
 
     #create a connection object using the connect_postgres() function and initialize a cursor
-
+    conn = psycopg2.connect(database=database_name, user=db_user, password=db_password, host=db_host)
     cursor = conn.cursor()
 
     # Create a tuple containing the SQL commands for creating the tables
@@ -239,8 +239,9 @@ def create_postgres_table(conn, structure):
 
     conn.commit()
     cursor.close()
+    conn.close()
 
-    return
+    return None
 
 def add_distance_columns(structure_1, structure_2, conn):
     # package import
@@ -650,3 +651,109 @@ def save_csv(csv_fn, output_dir, df_to_save):
         df_to_save.to_csv(output_dir + '/' + csv_fn, index = False)
 
     return None
+
+
+def calculate_fraction_rna(structure_1, structure_2, image_name_column, distance_threshold, granule_bool, granule_threshold, database_name, db_user, db_password, db_host):
+    from psycopg2 import sql
+    import psycopg2
+    import pandas as pd
+
+    conn = psycopg2.connect(database=database_name, user=db_user, password=db_password, host=db_host)
+    cur = conn.cursor()
+
+    distance_col = 'distance_to_' + structure_2
+
+    # if user does not specify a distance threshold, use the largest distance from the db
+    if distance_threshold == None:
+        max_distance_query = sql.SQL("SELECT MAX({distance_col}) from {structure_1_table}").format(structure_1_table=sql.Identifier(structure_1), distance_col = sql.Identifier(distance_col))
+        cur.execute(max_distance_query)
+        distance_threshold = cur.fetchall()[0][0]
+
+    # calculate the total structure 1 fluoresence, grouped by image
+    total_structure_1_sql = sql.SQL("""SELECT {name},
+                                sum(total_intensity)
+                        FROM {structure_1_table}
+                        WHERE {distance_col} <= %(max_distance)s
+                        GROUP BY {name};""").format(
+                        structure_1_table = sql.Identifier(structure_1),
+                        distance_col =sql.Identifier(distance_col),
+                        name = sql.Identifier(image_name_column))
+
+    conn = psycopg2.connect(database=database_name, user=db_user, password=db_password, host=db_host)
+    cur = conn.cursor()
+
+    cur.execute(total_structure_1_sql, {'max_distance':distance_threshold})
+    total_structure_1_data = cur.fetchall()
+
+
+    # get the sum of structure 1 fluoresence intensity at each distance from structure 2
+    structure_1_distance_query = sql.SQL("""SELECT {name},
+                                                    SUM(total_intensity),
+                                                    {distance_col}
+                                            FROM {structure_1_table}
+                                            WHERE {distance_col} <= %(max_distance)s
+                                            GROUP BY {name}, {distance_col};""").format(
+                structure_1_table = sql.Identifier(structure_1),
+                distance_col =sql.Identifier(distance_col),
+                name = sql.Identifier(image_name_column))
+
+    cur.execute(structure_1_distance_query, {'max_distance':distance_threshold})
+    structure_1_per_distance_data = cur.fetchall()
+
+
+    # calculate the % in objects > the granule_threshold if user desires
+    if granule_bool:
+        structure_1_granule_query = sql.SQL("""SELECT {name},
+                                                        SUM(total_intensity),
+                                                        {distance_col}
+                                                FROM {structure_1_table}
+                                                WHERE {distance_col} <= %(max_distance)s
+                                                AND normalized_intensity >= %(granule_threshold)s
+                                                GROUP BY {name}, {distance_col};""").format(
+                    structure_1_table = sql.Identifier(structure_1),
+                    distance_col =sql.Identifier(distance_col),
+                    name = sql.Identifier(image_name_column))
+
+        cur.execute(structure_1_granule_query, {'max_distance':distance_threshold, 'granule_threshold': granule_threshold})
+        structure_1_granule_data = cur.fetchall()
+
+
+
+
+    # get the image data for the experiment
+    image_data_query = """SELECT * FROM images;"""
+    cur.execute(image_data_query)
+    image_data = cur.fetchall()
+
+    # get the column names for the images table
+    column_name_query = "SELECT column_name FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'images';"
+    cur.execute(column_name_query)
+    column_names = cur.fetchall()
+
+
+    cur.close()
+    conn.close()
+
+    column_names_ls = [name[0] for name in column_names]
+    image_data_df = pd.DataFrame(image_data, columns = column_names_ls)
+
+
+    total_structure_1_df = pd.DataFrame(total_structure_1_data, columns = ['name', 'structure_1_per_image'])
+
+    structure_1_per_distance_df = pd.DataFrame(structure_1_per_distance_data, columns = ['name', 'structure_1_per_distance', 'distance'])
+
+    structure_1_df = structure_1_per_distance_df.merge(total_structure_1_df, on = 'name', how='left')
+    structure_1_df['percent_distance'] = structure_1_df['structure_1_per_distance'] / structure_1_df['structure_1_per_image'] * 100
+
+    if granule_bool:
+        structure_1_granule_df = pd.DataFrame(structure_1_granule_data, columns = ['name', 'granule_intensity', 'distance'])
+        structure_1_granule_merge = structure_1_df.merge(structure_1_granule_df, on=['name', 'distance'], how='left')
+        structure_1_granule_merge['percent_granule'] = structure_1_granule_merge['granule_intensity'] / structure_1_granule_merge['structure_1_per_image'] * 100
+        structure_1_granule_merge.fillna(0, inplace=True)
+        structure_1_distribution_df = structure_1_granule_merge.merge(image_data_df, on='name', how='left')
+
+        return structure_1_distribution_df
+
+    structure_1_distribution_df = structure_1_df.merge(image_data_df, on='name', how='left')
+
+    return structure_1_distribution_df
